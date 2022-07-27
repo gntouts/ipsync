@@ -1,0 +1,7 @@
+run.sh
+ipsync
+secret.yaml
+config.json
+bin/
+*.list
+.vscode/
