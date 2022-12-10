@@ -5,25 +5,19 @@
 
 ## Building from source
 
-To build the `ipsync` binary you need to have `Docker` or `Go` (v1.16 or higher) installed.
+To build the `ipsync` binary you need to have  `Go` (v1.16 or higher) installed.
 
 ```bash
 git clone https://github.com/gntouts/ipsync.git
 cd ipsync
 
-make # This will try to build the binary using Go. If Go is not istalled it will attempt to build the binary using Docker
-
-# To use the Docker build system
-make docker
-
-# To use the Go build system
-make go
+make # This will try to build the binary using Go. If Go is not istalled it will prompt you tinstall go.
 
 # You can also use the `go build` command if you want to customize build flags etc
-go build -o ./ipsync ./src
+go build -o ./ipsync
 ```
 
-## Usage 
+## Usage
 
 You can use `ipsync` as a Docker container, as a service, or as a standalone binary.
 
@@ -86,32 +80,29 @@ sudo cat /var/log/syslog | grep ipsync
 
 > Note: If you want to make any changes, you can edit the `run-ipsync` file to change the variables and then restart the service.
 
-
 ### Run with Docker
 
-To run `ipsync` as a Docker container, you can use the `Dockerfile` provided to build an image and run it with your custom env vars.
-
-First, we need to build the image:
-
-```bash
-docker build -t ipsync:latest .
-```
-
-Then, we can run the container with the env variables required:
+To run `ipsync` as a Docker container, you can use the latest [image](https://hub.docker.com/repository/docker/gntouts/ipsync) to run the container with the env variables required:
 
 ```bash
 docker run -d --restart unless-stopped --env NETLIFY_TOKEN=<your_token> \
-    --env DNS_TARGET=<your_dns_target> --env IPSYNC_TIMEOUT=30 --name ipsync ipsync:latest
+    --env DNS_TARGET=<your_dns_target> --env IPSYNC_TIMEOUT=30 --name ipsync gntouts/ipsync:latest
 ```
 
 Or you can create a file to store the variables:
-    
+
 ```bash
 echo "NETLIFY_TOKEN=<your_token>" > env.list && \
     echo "DNS_TARGET=<your_dns_target>" >> env.list && \
     echo "IPSYNC_TIMEOUT=30" >> env.list
 
-docker run -d --restart unless-stopped --env-file env.list --name ipsync ipsync:latest
+docker run -d --restart unless-stopped --env-file env.list --name ipsync gntouts/ipsync:latest
+```
+
+Or you can you can use the `Dockerfile` provided to build your own image:
+
+```bash
+docker build -t ipsync:latest .
 ```
 
 To check the logs, run:
