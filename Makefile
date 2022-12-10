@@ -5,11 +5,8 @@ FROM golang:1.16-alpine
 
 WORKDIR /app
 
-COPY go.mod ./
-COPY go.sum ./
-RUN go mod download
-
-COPY src/*.go ./
+COPY ./* ./
+RUN go mod download && go mod tidy && go mod vendor
 
 RUN CGO_ENABLED=0 go build -tags netgo -ldflags '-w -extldflags "-static"' -o ipsync
 endef
@@ -30,12 +27,13 @@ default: build
 build: $(build_target)
 	
 docker:
-	@echo "Go is not installed. Building with Docker..."
+	@echo "Building with Docker..."
 ifdef DOCKER
 		@echo "Creating Dockerfile"
 		@echo "$$dockerstring" > Dockerfile.build
 		@echo "Building Dockerfile"
-		@docker build -t ipsync:build -f Dockerfile.build .  > /dev/null 2>&1
+		# @docker build -t ipsync:build -f Dockerfile.build .  > /dev/null 2>&1
+		@docker build -t ipsync:build -f Dockerfile.build .
 		@mkdir -p bin
 		@echo "Building 'ipsync' binary"
 		@docker run --name ipsync_build ipsync:build sh
@@ -52,6 +50,6 @@ endif
 
 go:
 	@mkdir -p bin
-	@CGO_ENABLED=0 go build -ldflags '-w -extldflags "-static"' -o ./bin/ipsync ./src
+	@CGO_ENABLED=0 go build -ldflags '-w -extldflags "-static"' -o ./bin/ipsync
 	@echo "Build complete."
 	@echo "The compiled binary is placed in './bin/ipsync'"
