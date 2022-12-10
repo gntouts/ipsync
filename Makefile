@@ -6,7 +6,7 @@ FROM golang:1.16-alpine
 WORKDIR /app
 
 COPY ./* ./
-RUN go mod download && go mod tidy && go mod vendor
+RUN apk update && apk add git && go mod download && go mod tidy && go mod vendor
 
 RUN CGO_ENABLED=0 go build -tags netgo -ldflags '-w -extldflags "-static"' -o ipsync
 endef
