@@ -1,91 +1,72 @@
 package main
 
 import (
-	"os"
-	"strconv"
 	"time"
 
-	"log/syslog"
-
+	"github.com/gntouts/ipsync/pkg/netlify"
 	"github.com/sirupsen/logrus"
-
-	netlify "github.com/gntouts/ipsync/pkg/netlify"
-	lSyslog "github.com/sirupsen/logrus/hooks/syslog"
 )
 
-const TIMEOUT = 20 // seconds
-
-type Config struct {
-	Token   string
-	Dns     string
-	Timeout int
-}
-
-func getConfig() Config {
-	token := os.Getenv("NETLIFY_TOKEN")
-	if token == "" {
-		logrus.Error("NETLIFY_TOKEN not set")
-		os.Exit(1)
-	}
-	dns_target := os.Getenv("DNS_TARGET")
-	if dns_target == "" {
-		logrus.Error("DNS_TARGET not set", "get_dns_target")
-		os.Exit(1)
-	}
-	timeout := os.Getenv("IPSYNC_TIMEOUT")
-	intVar, err := strconv.Atoi(timeout)
-	if err != nil {
-		intVar = 20
-	}
-	return Config{
-		Token:   token,
-		Dns:     dns_target,
-		Timeout: intVar,
-	}
-}
-
 func main() {
-	// configure logurs
-	formatter := new(logrus.TextFormatter)
-	formatter.DisableColors = true
-
-	logrus.SetFormatter(formatter)
-	hook, err := lSyslog.NewSyslogHook("", "", syslog.LOG_INFO, "")
-
-	if err == nil {
-		logrus.AddHook(hook)
+	configLogrus()
+	config, err := loadConfig()
+	if err != nil {
+		logrus.WithError(err).Fatal("Failed to load configuration from ENV variables")
 	}
-	logrus.Info("Started monitoring IP address", "main")
-
-	// retrieve config from ENV
-	config := getConfig()
-	target := config.Dns
-
-	netlify := netlify.NewNetlifyClient(config.Token)
-
-	zone := netlify.GetDnsZone(target)
-	record_id, record_ip := netlify.GetDnsRecord(zone, target)
-	logrus.Info("Netlify IP is set "+record_ip, "main")
-
+	logrus.WithFields(logrus.Fields{
+		"NETLIFY_TOKEN":  "REDACTED",
+		"DNS_TARGET":     config.DNSTarget,
+		"IPSYNC_TIMEOUT": config.Timeout,
+	}).Info("Loaded config from ENV variables")
+	ntlfClient := netlify.NewNetlifyClient(config.NetlifyToken)
+	zones, err := ntlfClient.GetDNSZones()
+	if err != nil {
+		logrus.WithError(err).Fatal("Failed to get Netlify DNS Zones")
+	}
+	var targetZone netlify.DNSZone
+	found := false
+	targetTLD, err := getTLD(config.DNSTarget)
+	if err != nil {
+		logrus.WithError(err).Fatal("Failed to get TLD from provided DNS target")
+	}
+	for _, zone := range zones {
+		if zone.Name == targetTLD {
+			targetZone = zone
+			found = true
+			break
+		}
+	}
+	if !found {
+		logrus.Fatal("DNS target not found in available DNS zones")
+	}
+	logrus.WithField("DNS zone", targetZone.ID).Info("Found DNS zone")
 	for {
-		current, err := GetIp()
+		dnsRecord, err := ntlfClient.GetDNSRecord(targetZone.ID, config.DNSTarget)
 		if err != nil {
-			logrus.Error(err.Error())
+			logrus.WithError(err).Fatal("Failed to get DNS record for provided DNS target")
 		}
+		logrus.WithField("DNS record hostname", dnsRecord.Hostname).WithField("DNS record value", dnsRecord.Value).Info("Found DNS record")
 
-		if current.Ip != record_ip {
-			netlify.DeleteDnsRecord(zone, record_id)
-			changed := netlify.CreateDnsRecord(zone, target, current.Ip)
-			logrus.Info("Local IP changed to "+current.Ip, "main")
-			var msg string
-			if changed {
-				msg = "Updated IP address to " + current.Ip
-			} else {
-				msg = "Failed to update IP address to " + current.Ip
-			}
-			logrus.Info(msg, "main")
-			record_id, record_ip = netlify.GetDnsRecord(zone, target)
+		myIP, err := getPublicIP()
+		if err != nil {
+			logrus.WithError(err).Fatal("Failed to get public IP")
 		}
-		time.Sleep(time.Duration(config.Timeout) * time.Second)
+		logrus.WithField("current IP", myIP).Info("Found current IP")
+		if myIP != dnsRecord.Value {
+			logrus.WithField("current IP", myIP).WithField("DNS IP", dnsRecord.Value).Info("DNS record mismatch")
+			err := ntlfClient.DeleteDNSRecord(targetZone.ID, dnsRecord.ID)
+			if err != nil {
+				logrus.WithError(err).Fatal("Failed to delete DNS record")
+			}
+			logrus.Info("Deleted old DNS record")
+			err = ntlfClient.CreateADNSRecord(targetZone.ID, config.DNSTarget, myIP)
+			if err != nil {
+				logrus.WithError(err).Fatal("Failed to create updated DNS record")
+			}
+			logrus.Info("Created updated DNS record")
+
+		}
+		logrus.Infof("Check complete, sleeping for %d seconds", config.Timeout)
+		time.Sleep(time.Second * time.Duration(config.Timeout))
 	}
 }

@@ -1,0 +1,10 @@
+version: '3.5'
+services:
+  ipsync:
+    image: docker.io/gntouts/ipsync:latest
+    container_name: ipsync
+    restart: 'unless-stopped'
+    environment:
+      - NETLIFY_TOKEN=REDACTED
+      - DNS_TARGET=test.gntouts.com
+      - IPSYNC_TIMEOUT=600

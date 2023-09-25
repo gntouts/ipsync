@@ -4,18 +4,15 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
-	"io/ioutil"
+	"fmt"
+	"io"
 	"net/http"
-	"os"
-	"strings"
 	"time"
-
-	"github.com/sirupsen/logrus"
 )
 
-const CT = "application/json"
+const ContentType = "application/json"
 
-type DnsZone struct {
+type DNSZone struct {
 	ID                   string        `json:"id"`
 	Name                 string        `json:"name"`
 	Errors               []interface{} `json:"errors"`
@@ -34,11 +31,7 @@ type DnsZone struct {
 	Dedicated            interface{}   `json:"dedicated"`
 }
 
-type DnsZones []struct {
-	DnsZone
-}
-
-type DnsRecord struct {
+type DNSRecord struct {
 	ID        string `json:"id"`
 	Hostname  string `json:"hostname"`
 	Type      string `json:"type"`
@@ -52,167 +45,119 @@ type DnsRecord struct {
 	Managed   bool   `json:"managed"`
 }
 
-type DnsRecords []struct {
-	DnsRecord
-}
-
-type CreateDnsRecord struct {
+type createDNSRecordReq struct {
 	Type     string `json:"type"`
 	Hostname string `json:"hostname"`
 	Value    string `json:"value"`
 	TTL      int    `json:"ttl"`
 }
-
+type simpleResponse struct {
+	body   []byte
+	status int
+}
 type NetlifyClient struct {
-	token string
+	token      string
+	httpClient *http.Client
 }
 
 func NewNetlifyClient(token string) *NetlifyClient {
-	return &NetlifyClient{token: token}
-}
-
-func (n NetlifyClient) httpClient() *http.Client {
-	return &http.Client{
+	temp := &http.Client{
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: true, // ignore expired SSL certificates
 			},
-		},
-	}
+		}}
+	return &NetlifyClient{token: token, httpClient: temp}
 }
 
-// Returns the DNS zone ID for the given hostname
-func (n NetlifyClient) GetDnsZone(hostname string) string {
-	var dns_zones DnsZones
-	url_parts := strings.Split(hostname, ".")
-	if len(url_parts) < 2 {
-		msg := "Invalid hostname: " + hostname
-		logrus.Error(msg, "get_dns_zone")
-		os.Exit(1)
-	}
-	target := url_parts[len(url_parts)-2] + "." + url_parts[len(url_parts)-1]
-	url := "https://api.netlify.com/api/v1/dns_zones"
+func (n NetlifyClient) doRequest(httpMethod string, targetURL string, b []byte) (r simpleResponse, err error) {
 	bearer := "Bearer " + n.token
-	req, err := http.NewRequest("GET", url, nil)
+	request, err := http.NewRequest(httpMethod, targetURL, bytes.NewBuffer(b))
 	if err != nil {
-		msg := "Failed to create request: " + err.Error()
-		logrus.Error(msg, "get_dns_zone")
+		return r, err
 	}
-
-	req.Header.Add("Authorization", bearer)
-	// client := &http.Client{Transport: transCfg}
-
-	resp, err := n.httpClient().Do(req)
+	request.Header.Add("Authorization", bearer)
+	request.Header.Set("Content-Type", ContentType)
+	response, err := n.httpClient.Do(request)
 	if err != nil {
-		msg := "Failed to send request: " + err.Error()
-		logrus.Error(msg, "get_dns_zone")
+		return r, err
 	}
-	defer resp.Body.Close()
-
-	body, err := ioutil.ReadAll(resp.Body)
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
 	if err != nil {
-		msg := "Failed to read body: " + err.Error()
-		logrus.Error(msg, "get_dns_zone")
+		return r, fmt.Errorf("failed to read body: %s", err.Error())
 	}
-	if err := json.Unmarshal(body, &dns_zones); err != nil {
-		msg := "Failed to unmarshal JSON: " + err.Error()
-		logrus.Error(msg, "get_dns_zone")
+	return simpleResponse{body: body, status: response.StatusCode}, nil
+}
+
+func (n NetlifyClient) GetDNSZones() (dnsZones []DNSZone, err error) {
+	response, err := n.doRequest("GET", "https://api.netlify.com/api/v1/dns_zones", nil)
+	if err != nil {
+		return nil, err
 	}
-	for _, zone := range dns_zones {
-		if zone.Name == target {
-			return zone.ID
+	err = json.Unmarshal(response.body, &dnsZones)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response to DNS zones list: %s", err.Error())
+	}
+	return dnsZones, nil
+}
+
+func (n NetlifyClient) GetDNSRecords(zoneID string) ([]DNSRecord, error) {
+	var records []DNSRecord
+	url := "https://api.netlify.com/api/v1/dns_zones/" + zoneID + "/dns_records"
+	response, err := n.doRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(response.body, &records); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response to DNS records: %s", err.Error())
+	}
+	return records, nil
+}
+
+func (n NetlifyClient) GetDNSRecord(zoneID string, hostname string) (DNSRecord, error) {
+	records, err := n.GetDNSRecords(zoneID)
+	if err != nil {
+		return DNSRecord{}, err
+	}
+	for _, r := range records {
+		if r.Hostname == hostname {
+			return r, nil
 		}
 	}
-	return ""
+	return DNSRecord{}, fmt.Errorf("failed to find requested record \"%s\" in DNS zone \"%s\" response to DNS records", hostname, zoneID)
 }
 
-// Return the DNS record ID for the given DNS zone and hostname
-func (n NetlifyClient) GetDnsRecord(zone_id string, hostname string) (string, string) {
-	var dns_records DnsRecords
-	url := "https://api.netlify.com/api/v1/dns_zones/" + zone_id + "/dns_records"
-	bearer := "Bearer " + n.token
-	req, err := http.NewRequest("GET", url, nil)
+func (n NetlifyClient) DeleteDNSRecord(zoneID string, recordID string) error {
+	url := "https://api.netlify.com/api/v1/dns_zones/" + zoneID + "/dns_records/" + recordID
+	response, err := n.doRequest("DELETE", url, nil)
 	if err != nil {
-		msg := "Failed to create request: " + err.Error()
-		logrus.Error(msg, "get_dns_zone")
+		return fmt.Errorf("failed to delete requested record \"%s\": %s", recordID, err.Error())
 	}
-
-	req.Header.Add("Authorization", bearer)
-
-	resp, err := n.httpClient().Do(req)
-	if err != nil {
-		msg := "Failed to send request: " + err.Error()
-		logrus.Error(msg, "get_dns_zone")
+	if response.status == 204 {
+		return nil
 	}
-	defer resp.Body.Close()
-
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		msg := "Failed to read body: " + err.Error()
-		logrus.Error(msg, "get_dns_zone")
-	}
-	if err := json.Unmarshal(body, &dns_records); err != nil {
-		msg := "Failed to unmarshal JSON: " + err.Error()
-		logrus.Error(msg, "get_dns_zone")
-	}
-	for _, record := range dns_records {
-		if record.Hostname == hostname {
-			return record.ID, record.Value
-		}
-	}
-	return "", ""
+	return fmt.Errorf("failed to delete requested record \"%s\": Expected HTTP 204, got %d", recordID, response.status)
 }
 
-// Deletes the given DNS record
-func (n NetlifyClient) DeleteDnsRecord(zone_id string, record_id string) bool {
-	url := "https://api.netlify.com/api/v1/dns_zones/" + zone_id + "/dns_records/" + record_id
-	bearer := "Bearer " + n.token
-	req, err := http.NewRequest("DELETE", url, nil)
-	if err != nil {
-		msg := "Failed to create request: " + err.Error()
-		logrus.Error(msg, "delete_dns_record")
-	}
-
-	req.Header.Add("Authorization", bearer)
-
-	resp, err := n.httpClient().Do(req)
-	if err != nil {
-		msg := "Failed to send request: " + err.Error()
-		logrus.Error(msg, "delete_dns_record")
-	}
-	return resp.StatusCode == 204
-}
-
-// Creates a new DNS record
-func (n NetlifyClient) CreateDnsRecord(zone_id string, hostname string, ip string) bool {
-	new_dns := CreateDnsRecord{
+func (n NetlifyClient) CreateADNSRecord(zoneID string, hostname string, IPaddress string) error {
+	requestBody := createDNSRecordReq{
 		Type:     "A",
 		Hostname: hostname,
-		Value:    ip,
+		Value:    IPaddress,
 		TTL:      3600,
 	}
-	data, err := json.Marshal(new_dns)
+	data, err := json.Marshal(requestBody)
 	if err != nil {
-		msg := "Failed to marshal DNS JSON: " + err.Error()
-		logrus.Error(msg, "create_dns_record")
+		return fmt.Errorf("Failed to marshal new DNS record to JSON: " + err.Error())
 	}
-	json_data := bytes.NewBuffer(data)
-
-	url := "https://api.netlify.com/api/v1/dns_zones/" + zone_id + "/dns_records"
-	bearer := "Bearer " + n.token
-	req, err := http.NewRequest("POST", url, json_data)
+	url := "https://api.netlify.com/api/v1/dns_zones/" + zoneID + "/dns_records"
+	response, err := n.doRequest("POST", url, data)
 	if err != nil {
-		msg := "Failed to create request: " + err.Error()
-		logrus.Error(msg, "create_dns_record")
+		return err
 	}
-
-	req.Header.Add("Authorization", bearer)
-	req.Header.Add("Content-Type", CT)
-
-	resp, err := n.httpClient().Do(req)
-	if err != nil {
-		msg := "Failed to send request: " + err.Error()
-		logrus.Error(msg, "delete_dns_record")
+	if response.status == 201 {
+		return nil
 	}
-	return resp.StatusCode == 201
+	return fmt.Errorf("failed to create requested record for \"%s\": Expected HTTP 201, got %d", hostname, response.status)
 }
